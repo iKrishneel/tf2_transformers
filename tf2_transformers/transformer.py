@@ -31,19 +31,19 @@ class Attention(object):
         assert query.shape == key.shape, \
             'Query and key dont have same dimensions'
 
-        scores = tf.matmul(query, key, transpose_b=True)
-        scores /= np.sqrt(query.shape[-1])
+        scores = tf.matmul(query, key, transpose_b=True) /\
+            tf.math.sqrt(tf.cast(tf.shape(key)[-1], tf.float32))
 
         if mask is not None:
             # todo: mask
             pass
 
-        attn_score = K.activations.softmax(scores, axis=-1)
+        attn_score = tf.nn.softmax(scores, axis=-1)
         attn_score = self.dropout(attn_score, self.is_training) \
             if self.dropout else attn_score
 
         self._attn_score = attn_score
-        return tf.matmul(attn_score, value, name='scores')
+        return tf.matmul(attn_score, value)
 
     @property
     def attn_score(self):
@@ -90,6 +90,7 @@ class MultiHeadAttention(K.layers.Layer):
         scores = self._attention(
             query=query, key=key, value=value, mask=mask)
         scores = tf.reshape(scores, (-1, self.d_model))
+
         return self._output(scores)
 
 
@@ -97,17 +98,16 @@ class PositionWiseFFN(K.layers.Layer):
 
     def __init__(self, d_model: int = 512, dff: int = 2048):
         super(PositionWiseFFN, self).__init__()
-        assert num_layers > 0, 'Number of layers must be positive'
 
-        self._ffn = K.K.Sequential(
-            [create_linear(units=d_model, activation=tf.nn.relu),
-             create_linear(units=dff)])
+        self._ffn = K.Sequential(
+            [create_linear(units=dff, activation=tf.nn.relu),
+             create_linear(units=d_model)])
 
     def build(self, input_shape):
         pass
 
     def call(self, inputs):
-        return self._ffns(inputs)
+        return self._ffn(inputs)
 
 
 class AddAndLayerNorm(K.layers.Layer):
@@ -152,7 +152,7 @@ class Encoder(K.layers.Layer):
         pass
 
     def call(self, inputs):
-        x = self._alm1(inputs, self._mha(inputs))
+        x = self._alm1(inputs[0], self._mha([inputs] * 3))
         return self._alm2(x, self._ffn(x))
 
 
@@ -168,8 +168,10 @@ class Decoder(K.layers.Layer):
 
         self._mmha = MultiHeadAttention(h=h, d_model=d_model)
         self._alm1 = AddAndLayerNorm(dropout_prob=dropout_prob)
-        self._mha = MultiHeadAttention(h=h, d_model=d_model),
+
+        self._mha = MultiHeadAttention(h=h, d_model=d_model)
         self._alm2 = AddAndLayerNorm(dropout_prob=dropout_prob)
+
         self._ffn = PositionWiseFFN(d_model=d_model, dff=dff)
         self._alm3 = AddAndLayerNorm(dropout_prob=dropout_prob)
 
@@ -177,9 +179,9 @@ class Decoder(K.layers.Layer):
         pass
 
     def call(self, attn_inp, shifted_inp):
-        x = self._alm1(shifted_inp, self._mmha(shifted_inp))
+        x = self._alm1(shifted_inp, self._mmha([shifted_inp] * 3))
         x = self._alm2(x, self._mha([attn_inp, attn_inp, x]))
-        x = self._alm3(x, self._ffn(x))
+        return self._alm3(x, self._ffn(x))
 
 
 class PositionEncoding(K.layers.Layer):
@@ -199,14 +201,11 @@ class PositionEncoding(K.layers.Layer):
                               dtype=np.float32)[:, np.newaxis]
         dimensions = np.arange(0, self.d_model,
                                dtype=np.float32)[np.newaxis, :]
-        encoding = self.theta(positions, dimensions)
+
+        encoding = positions / (10000 ** ((2 * i) / self.d_model))
         encoding[:, 0::2] = np.sin(encoding[:, 0::2])
         encoding[:, 1::2] = np.cos(encoding[:, 1::2])
         self.encoding = tf.convert_to_tensor(encoding)
-
-    def theta(self, pos, i):
-        deno = 10000 ** ((2 * i) / self.d_model)
-        return pos / deno
 
     def call(self, inputs):
         x = inputs + self.encoding
@@ -224,27 +223,28 @@ class Transformer(K.Model):
 
         self._encoders = K.Sequential(
             [Encoder(**kwargs) for _ in range(encoder_stacks)])
+        """
         self._decoders = K.Sequential(
-            [Decoder(**kwargs) for _ in range(decoder_stacks)])
+            [Decoder(**kwargs) for _ in range(decoder_stacks)])"""
+
+        self._decoders = [Decoder(**kwargs)
+                          for _ in range(decoder_stacks)]
 
         self._linear = create_linear(units=output_shape,
                                      activation=tf.nn.softmax)
 
-    def call(self, x, o):
-        x = self.decoder_stacks(self._encoders(x), o)
+    def call(self, x):
+        x = self._encoders(x)
+        for decoder in self._decoders:
+            x = decoder(x, x)
         return self._linear(x)
 
 
 if __name__ == '__main__':
 
     d_model = 512
-    word = tf.random.uniform([1, d_model])
+    word = tf.random.uniform([2, d_model])
+    # word = tf.random.uniform((1, 60, 512))
 
-    p = PositionEncoding()
-
-    """
-    m = MultiHeadAttention(h=8, d_model=d_model)
-    m.build(input_shape=[d_model] * 3)
-    x = m([word] * 3)
-    print(m.count_params())
-    print(x.shape)"""
+    t = Transformer(output_shape=8000)
+    t(word)
