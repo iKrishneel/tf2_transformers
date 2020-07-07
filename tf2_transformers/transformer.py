@@ -35,8 +35,7 @@ class Attention(object):
             tf.math.sqrt(tf.cast(tf.shape(key)[-1], tf.float32))
 
         if mask is not None:
-            # todo: mask
-            pass
+            scores += (mask * 1E-9)
 
         attn_score = tf.nn.softmax(scores, axis=-1)
         attn_score = self.dropout(attn_score, self.is_training) \
@@ -73,6 +72,9 @@ class MultiHeadAttention(K.layers.Layer):
         pass
 
     def call(self, inputs: list, mask=None):
+        """
+        inputs: query, key, value
+        """
         assert len(inputs) == 3, 'Invalid input size'
 
         outputs = [layers[i](inp)
@@ -151,8 +153,9 @@ class Encoder(K.layers.Layer):
     def build(self, input_shape):
         pass
 
-    def call(self, inputs):
-        x = self._alm1(inputs[0], self._mha([inputs] * 3))
+    def call(self, inputs, masks):
+        x = self._alm1(inputs[0],
+                       self._mha([inputs] * 3, mask=masks))
         return self._alm2(x, self._ffn(x))
 
 
@@ -168,19 +171,23 @@ class Decoder(K.layers.Layer):
 
         self._mmha = MultiHeadAttention(h=h, d_model=d_model)
         self._alm1 = AddAndLayerNorm(dropout_prob=dropout_prob)
-
         self._mha = MultiHeadAttention(h=h, d_model=d_model)
         self._alm2 = AddAndLayerNorm(dropout_prob=dropout_prob)
-
         self._ffn = PositionWiseFFN(d_model=d_model, dff=dff)
         self._alm3 = AddAndLayerNorm(dropout_prob=dropout_prob)
 
     def build(self, input_shape):
         pass
 
-    def call(self, attn_inp, shifted_inp):
-        x = self._alm1(shifted_inp, self._mmha([shifted_inp] * 3))
-        x = self._alm2(x, self._mha([attn_inp, attn_inp, x]))
+    def call(self, m, x, x_m, y_m):
+        """
+        m: memory
+        x: source
+        x_m: source mask
+        y_m: target mask
+        """
+        x = self._alm1(x, self._mmha([x] * 3, y_m))
+        x = self._alm2(x, self._mha([x, m, m], x_m))
         return self._alm3(x, self._ffn(x))
 
 
@@ -221,22 +228,27 @@ class Transformer(K.Model):
         encoder_stacks = kwargs.get('encoder_stacks', 6)
         decoder_stacks = kwargs.get('decoder_stacks', 6)
 
-        self._encoders = K.Sequential(
-            [Encoder(**kwargs) for _ in range(encoder_stacks)])
-        """
-        self._decoders = K.Sequential(
-            [Decoder(**kwargs) for _ in range(decoder_stacks)])"""
-
+        self._encoders = [Encoder(**kwargs)
+                          for _ in range(encoder_stacks)]
         self._decoders = [Decoder(**kwargs)
                           for _ in range(decoder_stacks)]
 
         self._linear = create_linear(units=output_shape,
                                      activation=tf.nn.softmax)
 
-    def call(self, x):
-        x = self._encoders(x)
+    def call(self, x, y, x_m, y_m):
+        """
+        Args:
+        x: source
+        y: target
+        x_m: source mask
+        y_m: target_mask
+        """
+        for encoder in self._encoders:
+            x = encoder(x, x_m)
+
         for decoder in self._decoders:
-            x = decoder(x, x)
+            x = decoder(x, y, x_m, y_m)
         return self._linear(x)
 
 
